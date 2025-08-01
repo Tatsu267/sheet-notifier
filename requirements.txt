@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+gunicorn
+SQLAlchemy
+psycopg2-binary
+pywebpush
+py-vapid
