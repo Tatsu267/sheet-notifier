@@ -8,7 +8,7 @@ from pywebpush import webpush, WebPushException
 import traceback
 import uuid
 from threading import Lock
-import time # ★★★★★ 追加：時間を扱うためのライブラリ ★★★★★
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -26,10 +26,9 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.file'
 ]
 
-# --- ★★★★★ 変更点：通知の状態に「最終通知時刻」を追加 ★★★★★ ---
+# --- 通知の状態管理 ---
 alert_state = {'state': 'inactive', 'responder_name': None, 'last_notify_time': 0}
 state_lock = Lock()
-NOTIFICATION_THRESHOLD = 5
 NOTIFICATION_COOLDOWN = 60 # 60秒のクールダウン
 
 # --- ヘルパー関数 (変更なし) ---
@@ -51,7 +50,6 @@ def get_worksheet(spreadsheet, sheet_name):
 def index():
     return "Advanced Interactive Notification Server is running."
 
-# (subscribeエンドポイントは変更なし)
 @app.route('/subscribe', methods=['POST'])
 def subscribe():
     data = request.get_json()
@@ -79,70 +77,59 @@ def subscribe():
         print(f"登録エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to save subscription'}), 500
 
-# ★★★★★ 変更点：通知送信ロジックをクールダウン対応に ★★★★★
 @app.route('/notify', methods=['POST'])
 def notify():
     global alert_state
     data = request.get_json()
     count = data.get('employeeCount', 0)
-    now = time.time() # 現在時刻を秒で取得
+    now = time.time()
 
     with state_lock:
-        # 状況が落ち着いたら（1人以下）、通知状態をリセット
-        if count <= 1 and alert_state['state'] != 'inactive':
-            print(f"台数が1以下になったため、通知状態をリセットします。")
-            alert_state = {'state': 'inactive', 'responder_name': None, 'last_notify_time': 0}
-            return jsonify({'status': 'alert reset'}), 200
+        # ★★★★★ 変更点：閾値判断を削除し、クールダウンと状態チェックのみに ★★★★★
+        if now - alert_state.get('last_notify_time', 0) > NOTIFICATION_COOLDOWN:
+            if alert_state['state'] == 'handled':
+                print(f"通知リクエストを受けましたが、既に「{alert_state['responder_name']}」が対応中のため、再通知はスキップします。")
+                return jsonify({'status': 'skipped, already handled'}), 200
 
-        # 閾値を超えているかチェック
-        if count >= NOTIFICATION_THRESHOLD:
-            # クールダウン時間が経過しているかチェック
-            if now - alert_state.get('last_notify_time', 0) > NOTIFICATION_COOLDOWN:
-                # 誰かが既に対応中の場合は、再通知しない
-                if alert_state['state'] == 'handled':
-                    print(f"既に{alert_state['responder_name']}が対応中のため、再通知はスキップします。")
-                    return jsonify({'status': 'skipped, already handled'}), 200
+            # --- 通知を送信 ---
+            try:
+                client = get_spreadsheet_client()
+                spreadsheet = client.open_by_key(SPREADSHEET_ID)
+                worksheet = get_worksheet(spreadsheet, SHEET_NAME_SUBSCRIPTIONS)
+                all_subscriptions = worksheet.get_all_records()
+                if not all_subscriptions:
+                    return jsonify({'status': 'No subscriptions to notify'}), 200
 
-                # --- 通知を送信 ---
-                try:
-                    client = get_spreadsheet_client()
-                    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-                    worksheet = get_worksheet(spreadsheet, SHEET_NAME_SUBSCRIPTIONS)
-                    all_subscriptions = worksheet.get_all_records()
-                    if not all_subscriptions:
-                        return jsonify({'status': 'No subscriptions to notify'}), 200
+                notification_id = str(uuid.uuid4())
+                notification_payload = json.dumps({
+                    'title': 'レジカート応援',
+                    'body': f'待ち状況が {count} 人です。応援に入ってください！',
+                    'notificationId': notification_id,
+                    'actions': [{'action': 'respond', 'title': '応援に入る'}]
+                })
 
-                    notification_id = str(uuid.uuid4())
-                    notification_payload = json.dumps({
-                        'title': 'レジカート応援',
-                        'body': f'待ち状況が {count} 人です。応援に入ってください！',
-                        'notificationId': notification_id,
-                        'actions': [{'action': 'respond', 'title': '応援に入る'}]
-                    })
-
-                    for sub_record in all_subscriptions:
-                        send_notification(sub_record['SubscriptionJSON'], notification_payload, worksheet)
-                    
-                    alert_state['state'] = 'pending'
-                    alert_state['last_notify_time'] = now # 最終通知時刻を更新
-                    print(f"応援要請を送信しました。ステータス: {alert_state['state']}")
-                    return jsonify({'status': 'Notifications sent'}), 200
-                except Exception as e:
-                    print(f"通知送信エラー: {traceback.format_exc()}")
-                    return jsonify({'error': 'Failed to send notifications'}), 500
+                for sub_record in all_subscriptions:
+                    send_notification(sub_record['SubscriptionJSON'], notification_payload, worksheet)
+                
+                alert_state['state'] = 'pending'
+                alert_state['last_notify_time'] = now
+                print(f"応援要請を送信しました。ステータス: {alert_state['state']}")
+                return jsonify({'status': 'Notifications sent'}), 200
+            except Exception as e:
+                print(f"通知送信エラー: {traceback.format_exc()}")
+                return jsonify({'error': 'Failed to send notifications'}), 500
         
-        return jsonify({'status': 'notification not sent'}), 200
+        return jsonify({'status': 'notification skipped due to cooldown'}), 200
 
-# (reset-alertエンドポイントは変更なし)
 @app.route('/reset-alert', methods=['POST'])
 def reset_alert():
     global alert_state
     with state_lock:
         if alert_state['state'] != 'inactive':
+            print(f"Tampermonkeyからの命令により、通知状態をリセットします。")
             alert_state = {'state': 'inactive', 'responder_name': None, 'last_notify_time': 0}
     return jsonify({'status': 'alert status reset'}), 200
 
-# (respondエンドポイントは変更なし)
 @app.route('/respond', methods=['POST'])
 def respond():
     global alert_state
@@ -172,18 +159,18 @@ def respond():
                 return jsonify({'status': 'Alert was already inactive'}), 200
             elif alert_state['state'] == 'pending':
                 alert_state = {'state': 'handled', 'responder_name': responder_name, 'last_notify_time': alert_state['last_notify_time']}
-                print(f"{responder_name}が最初の応答者です。ステータス: {alert_state}")
+                print(f"「{responder_name}」が最初の応答者です。ステータス: {alert_state}")
                 
-                payload = json.dumps({'title': '応援応答', 'body': f'{responder_name}が応援に入ります。'})
+                payload = json.dumps({'title': '応援応答', 'body': f'「{responder_name}」が応援に入ります。'})
                 for sub_record in all_subscriptions:
                     if sub_record['Endpoint'] != responder_endpoint:
                         send_notification(sub_record['SubscriptionJSON'], payload, worksheet)
                 return jsonify({'status': 'Response accepted'}), 200
             elif alert_state['state'] == 'handled':
                 original_responder = alert_state['responder_name']
-                print(f"{responder_name}から応答がありましたが、既にoriginal_responder}が対応中です。")
+                print(f"「{responder_name}」から応答がありましたが、既に「{original_responder}」が対応中です。")
                 
-                payload = json.dumps({'title': '応援重複', 'body': f'ありがとうございます。既に{original_responder}が応援に入っています。'})
+                payload = json.dumps({'title': '応援重複', 'body': f'ありがとうございます。既に「{original_responder}」が応援に入っています。'})
                 send_notification(json.dumps(responder_subscription), payload, worksheet)
                 return jsonify({'status': 'Alert was already handled'}), 200
         
@@ -198,22 +185,4 @@ def send_notification(subscription_json, payload, worksheet):
     try:
         subscription_info = json.loads(subscription_json)
         webpush(
-            subscription_info=subscription_info,
-            data=payload,
-            vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"}
-        )
-    except WebPushException as e:
-        print(f"通知送信失敗: {e}")
-        if e.response and e.response.status_code == 410:
-            endpoint_to_delete = json.loads(subscription_json).get('endpoint')
-            try:
-                cell = worksheet.find(endpoint_to_delete, in_column=2)
-                if cell:
-                    worksheet.delete_rows(cell.row)
-                    print(f"無効な宛先を削除しました: {endpoint_to_delete}")
-            except Exception as find_err:
-                print(f"無効な宛先の検索/削除中にエラー: {find_err}")
-
-if __name__ == '__main__':
-    app.run(port=int(os.environ.get('PORT', 8080)))
+            subscripti
