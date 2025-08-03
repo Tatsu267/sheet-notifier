@@ -4,4 +4,4 @@ gunicorn
 pywebpush
 py-vapid
 gspread
-google-auth-oauth2client
+google-auth-oauthlib
