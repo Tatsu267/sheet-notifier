@@ -89,7 +89,7 @@ def notify():
             return jsonify({'status': 'No subscriptions to notify'}), 200
 
         notification_payload = json.dumps({
-            'title': 'レジカート通知',
+            'title': 'レジカート応援要請',
             'body': f'待ち状況が {count} 人になりました！',
         })
 
