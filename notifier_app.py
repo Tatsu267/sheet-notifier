@@ -15,6 +15,7 @@ CORS(app)
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY')
 VAPID_ADMIN_EMAIL = os.environ.get('VAPID_ADMIN_EMAIL')
 SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+NETLIFY_SITE_URL = os.environ.get('NETLIFY_SITE_URL', 'https://your-site.netlify.app') # デフォルト値を設定
 
 # --- Google Sheetsの設定 ---
 SERVICE_ACCOUNT_FILE_PATH = '/etc/secrets/service_account.json'
@@ -24,13 +25,9 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.file'
 ]
 
-# --- 通知の状態を管理する変数 ---
-# 'inactive': 通知可能
-# 'pending': 応援要請送信済み、応答待ち
-# 'handled': 誰かが応援に入り、リセット待ち
 alert_status = 'inactive'
 
-# --- ヘルパー関数 ---
+# (get_spreadsheet_client, get_worksheet, subscribe, respond, send_notification関数は変更ないため省略)
 def get_spreadsheet_client():
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE_PATH, scopes=SCOPES)
     return gspread.authorize(creds)
@@ -43,42 +40,18 @@ def get_worksheet(spreadsheet, sheet_name):
         worksheet.append_row(['DeviceName', 'Endpoint', 'SubscriptionJSON'])
         return worksheet
 
-def send_notification(subscription_json, payload, worksheet):
-    try:
-        subscription_info = json.loads(subscription_json)
-        webpush(
-            subscription_info=subscription_info,
-            data=payload,
-            vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"}
-        )
-    except WebPushException as e:
-        print(f"通知送信失敗: {e}")
-        if e.response and e.response.status_code == 410:
-            endpoint_to_delete = json.loads(subscription_json).get('endpoint')
-            try:
-                cell = worksheet.find(endpoint_to_delete, in_column=2)
-                if cell:
-                    worksheet.delete_rows(cell.row)
-                    print(f"無効な宛先を削除しました: {endpoint_to_delete}")
-            except Exception as find_err:
-                print(f"無効な宛先の検索/削除中にエラー: {find_err}")
-
-# --- APIエンドポイント ---
 @app.route('/')
 def index():
-    return "Simple Notification Server is running."
+    return "Interactive Notification Server is running."
 
 @app.route('/subscribe', methods=['POST'])
 def subscribe():
     data = request.get_json()
     if not data or 'subscription' not in data or 'deviceName' not in data:
         return jsonify({'error': 'Invalid data format'}), 400
-
     subscription_data = data.get('subscription')
     device_name = data.get('deviceName')
     endpoint = subscription_data.get('endpoint')
-
     try:
         client = get_spreadsheet_client()
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
@@ -86,14 +59,11 @@ def subscribe():
         cell = worksheet.find(endpoint, in_column=2)
         if cell:
             worksheet.update_cell(cell.row, 1, device_name)
-            print(f"通知先の端末名を更新しました: {device_name}")
             return jsonify({'status': 'updated'}), 200
         else:
             worksheet.append_row([device_name, endpoint, json.dumps(subscription_data)])
-            print(f"新しい通知先を登録しました: {device_name}")
             return jsonify({'status': 'success'}), 201
     except Exception:
-        print(f"登録エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to save subscription'}), 500
 
 @app.route('/notify', methods=['POST'])
@@ -112,11 +82,15 @@ def notify():
                 return jsonify({'status': 'No subscriptions to notify'}), 200
 
             notification_id = str(uuid.uuid4())
+            # ★★★★★ 変更点：通知ペイロードに開くページのURLを追加 ★★★★★
+            action_page_url = f"{NETLIFY_SITE_URL}/action.html?nid={notification_id}"
+            
             notification_payload = json.dumps({
                 'title': 'レジカート応援',
                 'body': f'待ち状況が {count} 人です。応援に入ってください！',
                 'notificationId': notification_id,
-                'actions': [{'action': 'respond', 'title': '応援に入る'}]
+                'actions': [{'action': 'respond', 'title': '応援に入る'}],
+                'url': action_page_url # 開くページのURL
             })
 
             for sub_record in all_subscriptions:
@@ -126,17 +100,15 @@ def notify():
             print(f"応援要請を送信しました。ステータス: {alert_status}")
             return jsonify({'status': 'Notifications sent'}), 200
         except Exception:
-            print(f"通知エラー: {traceback.format_exc()}")
             return jsonify({'error': 'Failed to send notifications'}), 500
     else:
-        print(f"通知リクエストを受けましたが、既に通知済みのためスキップしました。ステータス: {alert_status}")
         return jsonify({'status': 'skipped'}), 200
 
 @app.route('/reset-alert', methods=['POST'])
 def reset_alert():
     global alert_status
     alert_status = 'inactive'
-    print(f"Tampermonkeyからの命令により、通知状態をリセットしました。ステータス: {alert_status}")
+    print(f"通知状態をリセットしました。ステータス: {alert_status}")
     return jsonify({'status': 'alert status reset'}), 200
 
 @app.route('/respond', methods=['POST'])
@@ -146,26 +118,21 @@ def respond():
     responder_subscription = data.get('subscription')
     if not responder_subscription:
         return jsonify({'error': 'Invalid response data'}), 400
-
     responder_endpoint = responder_subscription.get('endpoint')
     
     try:
         if alert_status == 'pending':
             alert_status = 'handled'
-            
             client = get_spreadsheet_client()
             spreadsheet = client.open_by_key(SPREADSHEET_ID)
             worksheet = get_worksheet(spreadsheet, SHEET_NAME_SUBSCRIPTIONS)
             all_subscriptions = worksheet.get_all_records()
-
             responder_name = "不明なデバイス"
             for sub_record in all_subscriptions:
                 if sub_record['Endpoint'] == responder_endpoint:
                     responder_name = sub_record['DeviceName']
                     break
             
-            print(f"「{responder_name}」からの応答を処理しました。ステータス: {alert_status}")
-
             response_payload = json.dumps({
                 'title': '応援応答',
                 'body': f'{responder_name}が応援に入ります。'
@@ -177,11 +144,28 @@ def respond():
             
             return jsonify({'status': 'Response notification sent'}), 200
         else:
-            print(f"応答がありましたが、現在のステータスは {alert_status} のため、何もしません。")
             return jsonify({'status': f'Alert is not pending, but {alert_status}'}), 200
     except Exception:
-        print(f"応答処理エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to process response'}), 500
+
+def send_notification(subscription_json, payload, worksheet):
+    try:
+        subscription_info = json.loads(subscription_json)
+        webpush(
+            subscription_info=subscription_info,
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"}
+        )
+    except WebPushException as e:
+        if e.response and e.response.status_code == 410:
+            endpoint_to_delete = json.loads(subscription_json).get('endpoint')
+            try:
+                cell = worksheet.find(endpoint_to_delete, in_column=2)
+                if cell:
+                    worksheet.delete_rows(cell.row)
+            except Exception as find_err:
+                print(f"無効な宛先の検索/削除中にエラー: {find_err}")
 
 if __name__ == '__main__':
     app.run(port=int(os.environ.get('PORT', 8080)))
