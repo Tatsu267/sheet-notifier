@@ -24,12 +24,11 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.file'
 ]
 
-# --- ★★★★★ 追加：通知の状態を管理する変数 ★★★★★ ---
+# --- 通知の状態を管理する変数 ---
 # 'inactive': 通知不要（初期状態、または状況鎮静後）
 # 'pending': 応援要請が送信され、応答を待っている状態
 # 'handled': 誰かが応援に入り、台数がリセットされるのを待っている状態
 alert_status = 'inactive'
-NOTIFICATION_THRESHOLD = 5
 
 # --- ヘルパー関数 ---
 def get_spreadsheet_client():
@@ -85,14 +84,16 @@ def notify():
 
     try:
         # 状況が落ち着いたら（1人以下）、通知状態をリセット
+        # このロジックは、Tampermonkey側がリセットし忘れた場合の安全装置として残します
         if count <= 1:
             if alert_status != 'inactive':
                 alert_status = 'inactive'
                 print(f"台数が1以下になったため、通知状態をリセットします。ステータス: {alert_status}")
             return jsonify({'status': 'alert reset or not needed'}), 200
 
-        # 閾値を超えていて、かつまだ誰も応援要請を送っていない場合
-        if count >= NOTIFICATION_THRESHOLD and alert_status == 'inactive':
+        # ★★★★★ 修正箇所：閾値の判断を削除 ★★★★★
+        # Tampermonkeyからのリクエストを信頼し、まだ誰も応援要請を送っていない場合のみ通知
+        if alert_status == 'inactive':
             client = get_spreadsheet_client()
             spreadsheet = client.open_by_key(SPREADSHEET_ID)
             worksheet = get_worksheet(spreadsheet, SHEET_NAME_SUBSCRIPTIONS)
@@ -103,9 +104,9 @@ def notify():
             notification_id = str(uuid.uuid4())
             notification_payload = json.dumps({
                 'title': 'レジカート応援',
-                'body': f'待ち状況が {count} 人です。応援が必要です！',
+                'body': f'待ち状況が {count} 人になりました！',
                 'notificationId': notification_id,
-                'actions': [{'action': 'respond', 'title': '応援に入る'}] # ボタン付き
+                'actions': [{'action': 'respond', 'title': '応援に入る'}]
             })
 
             for sub_record in all_subscriptions:
@@ -116,8 +117,8 @@ def notify():
             return jsonify({'status': 'Notifications sent'}), 200
         
         else:
-            print(f"通知は送信されませんでした。現在の台数: {count}, 通知ステータス: {alert_status}")
-            return jsonify({'status': 'notification not sent'}), 200
+            print(f"通知リクエストを受けましたが、既に通知済みのためスキップしました。ステータス: {alert_status}")
+            return jsonify({'status': 'notification skipped, already pending/handled'}), 200
 
     except Exception:
         print(f"通知エラー: {traceback.format_exc()}")
@@ -134,9 +135,8 @@ def respond():
     responder_endpoint = responder_subscription.get('endpoint')
     
     try:
-        # 応援要請が出ている場合のみ応答を処理
         if alert_status == 'pending':
-            alert_status = 'handled' # 状態を「対応中」に更新
+            alert_status = 'handled'
             
             client = get_spreadsheet_client()
             spreadsheet = client.open_by_key(SPREADSHEET_ID)
@@ -154,7 +154,6 @@ def respond():
             response_payload = json.dumps({
                 'title': '応援応答',
                 'body': f'{responder_name}が応援に入ります。'
-                # ボタンは含めない
             })
             
             for sub_record in all_subscriptions:
@@ -168,6 +167,7 @@ def respond():
     except Exception:
         print(f"応答処理エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to process response'}), 500
+
 
 def send_notification(subscription_json, payload, worksheet):
     try:
