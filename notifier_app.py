@@ -102,8 +102,8 @@ def notify():
 
             notification_id = str(uuid.uuid4())
             notification_payload = json.dumps({
-                'title': 'レジカート応援要請',
-                'body': f'待ち状況が {count} 人になりました！',
+                'title': 'レジカート応援',
+                'body': f'待ち状況が {count} 人です。応援が必要です！',
                 'notificationId': notification_id,
                 'actions': [{'action': 'respond', 'title': '応援に入る'}] # ボタン付き
             })
@@ -153,7 +153,7 @@ def respond():
 
             response_payload = json.dumps({
                 'title': '応援応答',
-                'body': f'「{responder_name}」が応援に入ります。'
+                'body': f'{responder_name}が応援に入ります。'
                 # ボタンは含めない
             })
             
