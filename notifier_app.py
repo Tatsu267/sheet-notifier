@@ -17,6 +17,7 @@ CORS(app)
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY')
 VAPID_ADMIN_EMAIL = os.environ.get('VAPID_ADMIN_EMAIL')
 SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+NETLIFY_SITE_URL = os.environ.get('NETLIFY_SITE_URL', 'https://your-site.netlify.app') # デフォルト値を設定
 
 # --- Google Sheetsの設定 ---
 SERVICE_ACCOUNT_FILE_PATH = '/etc/secrets/service_account.json'
@@ -99,11 +100,15 @@ def notify():
                     return jsonify({'status': 'No subscriptions to notify'}), 200
 
                 notification_id = str(uuid.uuid4())
+                # ★★★★★ 変更点：通知ペイロードに開くページのURLを追加 ★★★★★
+                action_page_url = f"{NETLIFY_SITE_URL}/action.html?nid={notification_id}"
+
                 notification_payload = json.dumps({
                     'title': 'レジカート応援',
                     'body': f'待ち状況が {count} 人です。応援に入ってください！',
                     'notificationId': notification_id,
-                    'actions': [{'action': 'respond', 'title': '応援に入る'}]
+                    'actions': [{'action': 'respond', 'title': '応援に入る'}],
+                    'url': action_page_url # 開くページのURL
                 })
 
                 for sub_record in all_subscriptions:
@@ -178,7 +183,6 @@ def respond():
         print(f"応答処理エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to process response'}), 500
 
-# ★★★★★ 修正箇所：構文エラーを修正 ★★★★★
 def send_notification(subscription_json, payload, worksheet):
     try:
         subscription_info = json.loads(subscription_json)
