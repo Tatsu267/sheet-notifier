@@ -31,7 +31,7 @@ alert_state = {'state': 'inactive', 'responder_name': None, 'last_notify_time': 
 state_lock = Lock()
 NOTIFICATION_COOLDOWN = 60 # 60秒のクールダウン
 
-# --- ヘルパー関数 (変更なし) ---
+# --- ヘルパー関数 ---
 def get_spreadsheet_client():
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE_PATH, scopes=SCOPES)
     return gspread.authorize(creds)
@@ -85,13 +85,11 @@ def notify():
     now = time.time()
 
     with state_lock:
-        # ★★★★★ 変更点：閾値判断を削除し、クールダウンと状態チェックのみに ★★★★★
         if now - alert_state.get('last_notify_time', 0) > NOTIFICATION_COOLDOWN:
             if alert_state['state'] == 'handled':
                 print(f"通知リクエストを受けましたが、既に「{alert_state['responder_name']}」が対応中のため、再通知はスキップします。")
                 return jsonify({'status': 'skipped, already handled'}), 200
 
-            # --- 通知を送信 ---
             try:
                 client = get_spreadsheet_client()
                 spreadsheet = client.open_by_key(SPREADSHEET_ID)
@@ -180,9 +178,27 @@ def respond():
         print(f"応答処理エラー: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to process response'}), 500
 
-
+# ★★★★★ 修正箇所：構文エラーを修正 ★★★★★
 def send_notification(subscription_json, payload, worksheet):
     try:
         subscription_info = json.loads(subscription_json)
         webpush(
-            subscripti
+            subscription_info=subscription_info,
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"}
+        )
+    except WebPushException as e:
+        print(f"通知送信失敗: {e}")
+        if e.response and e.response.status_code == 410:
+            endpoint_to_delete = json.loads(subscription_json).get('endpoint')
+            try:
+                cell = worksheet.find(endpoint_to_delete, in_column=2)
+                if cell:
+                    worksheet.delete_rows(cell.row)
+                    print(f"無効な宛先を削除しました: {endpoint_to_delete}")
+            except Exception as find_err:
+                print(f"無効な宛先の検索/削除中にエラー: {find_err}")
+
+if __name__ == '__main__':
+    app.run(port=int(os.environ.get('PORT', 8080)))
