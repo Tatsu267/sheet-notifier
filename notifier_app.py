@@ -17,7 +17,7 @@ CORS(app)
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY')
 VAPID_ADMIN_EMAIL = os.environ.get('VAPID_ADMIN_EMAIL')
 SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
-NETLIFY_SITE_URL = os.environ.get('NETLIFY_SITE_URL', 'https://your-site.netlify.app') # デフォルト値を設定
+NETLIFY_SITE_URL = os.environ.get('NETLIFY_SITE_URL', 'https://your-site.netlify.app')
 
 # --- Google Sheetsの設定 ---
 SERVICE_ACCOUNT_FILE_PATH = '/etc/secrets/service_account.json'
@@ -100,15 +100,14 @@ def notify():
                     return jsonify({'status': 'No subscriptions to notify'}), 200
 
                 notification_id = str(uuid.uuid4())
-                # ★★★★★ 変更点：通知ペイロードに開くページのURLを追加 ★★★★★
                 action_page_url = f"{NETLIFY_SITE_URL}/action.html?nid={notification_id}"
-
+                
                 notification_payload = json.dumps({
                     'title': 'レジカート応援',
                     'body': f'待ち状況が {count} 人です。応援に入ってください！',
                     'notificationId': notification_id,
                     'actions': [{'action': 'respond', 'title': '応援に入る'}],
-                    'url': action_page_url # 開くページのURL
+                    'url': action_page_url
                 })
 
                 for sub_record in all_subscriptions:
@@ -190,7 +189,10 @@ def send_notification(subscription_json, payload, worksheet):
             subscription_info=subscription_info,
             data=payload,
             vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"}
+            vapid_claims={'sub': f"mailto:{VAPID_ADMIN_EMAIL}"},
+            # ★★★★★ 追加：通知の優先度を最高に設定 ★★★★★
+            ttl=3600, # 1時間以内に届かなければ諦める
+            headers={'Urgency': 'high'} # 緊急度を「高」に設定
         )
     except WebPushException as e:
         print(f"通知送信失敗: {e}")
